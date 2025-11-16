@@ -1,15 +1,17 @@
 <?php
 include 'config.php';
 
+$error = "";
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email = $_POST['email'] ?? '';
-    $pw = $_POST['password'] ?? '';
+    $pw    = $_POST['password'] ?? '';
 
     if ($email === '' || $pw === '') {
         $error = "이메일과 비밀번호를 입력하세요.";
     } else {
         $data = json_encode([
-            "email" => $email,
+            "email"    => $email,
             "password" => $pw
         ]);
 
@@ -22,11 +24,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]);
 
         $response = curl_exec($ch);
-        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $status   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        if ($status === 200) {
-            // 가입 성공 → 로그인 페이지로 리다이렉트 + 성공 표시
+        if ($status === 201 || $status === 200) {
+            // 회원가입 성공 → 로그인 페이지로 리다이렉트
             header("Location: login.php?signup=success");
             exit;
         } else {

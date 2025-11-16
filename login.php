@@ -7,13 +7,13 @@ $fromSignup = (isset($_GET['signup']) && $_GET['signup'] === 'success');
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email = $_POST['email'] ?? '';
-    $pw = $_POST['password'] ?? '';
+    $pw    = $_POST['password'] ?? '';
 
     if ($email === '' || $pw === '') {
         $error = "이메일과 비밀번호를 입력하세요.";
     } else {
         $data = json_encode([
-            "email" => $email,
+            "email"    => $email,
             "password" => $pw
         ]);
 
@@ -21,14 +21,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HEADER, true);  // 헤더+바디 모두 받기
+        curl_setopt($ch, CURLOPT_HEADER, true); // 헤더+바디 모두 받기
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             "Content-Type: application/json"
         ]);
 
-        $response = curl_exec($ch);
+        $response    = curl_exec($ch);
         $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $status      = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
         $header = substr($response, 0, $header_size);
@@ -39,7 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (preg_match('/set-cookie:\s*sessionId=([^;]+)/i', $header, $m)) {
                 $session = $m[1];
                 // 브라우저 쿠키로 저장 (Secure는 HTTPS에서만 동작)
-                setcookie("sessionId", $session, time()+7200, "/", "", false, true);
+                setcookie("sessionId", $session, time() + 7200, "/", "", false, true);
                 $loginSuccess = true;
             } else {
                 $error = "로그인은 되었지만 sessionId 쿠키를 받지 못했습니다.";
