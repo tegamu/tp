@@ -2,7 +2,7 @@
 include 'config.php';
 
 if (!isset($_COOKIE['sessionId'])) {
-    echo "로그인 필요함";
+    echo "로그인 필요함 (sessionId 쿠키 없음)";
     exit;
 }
 
@@ -15,7 +15,8 @@ curl_setopt($ch, CURLOPT_HTTPHEADER, [
 ]);
 
 $response = curl_exec($ch);
-$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$status   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
 
 echo "<pre>STATUS: $status\n$response</pre>";
 
