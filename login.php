@@ -62,12 +62,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <?php if ($fromSignup): ?>
     <p style="color:green;">회원가입 성공! 이제 로그인하세요.</p>
   <?php endif; ?>
-
   <?php if ($loginSuccess): ?>
     <p style="color:green;">로그인 성공!</p>
     <p>
       <a href="me.php">내 정보 보기</a> |
       <a href="logout.php">로그아웃</a>
+    </p>
+    <p style="margin-top: 12px;">
+      <a href="session_create.php">
+        <button type="button">게임 세션 만들러 가기</button>
+      </a>
     </p>
   <?php else: ?>
     <?php if (!empty($error)): ?>
