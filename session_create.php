@@ -3,7 +3,7 @@
 include 'config.php';
 
 //    - DCV 게이트웨이 인스턴스 퍼블릭 IP 또는 도메인
-$DCV_GATEWAY_HOST = "1.2.3.4"; 
+$DCV_GATEWAY_HOST = "nas.tegamu.shop"; 
 
 // 로그인 여부 체크 (sessionId 쿠키 없으면 막기)
 if (!isset($_COOKIE['sessionId'])) {
@@ -88,7 +88,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <?php
       $gameSessionId = $result['gameSessionId'] ?? null;
 
-      $connectUrl = "https://" . $DCV_GATEWAY_HOST . ":8443";
+      $connectUrl = "https://" . $DCV_GATEWAY_HOST . ":80";
     ?>
 
     <p style="margin-top: 12px;">
