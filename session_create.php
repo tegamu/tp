@@ -2,7 +2,10 @@
 // session_create.php
 include 'config.php';
 
-// 로그인 안 돼 있으면 막기
+//    - DCV 게이트웨이 인스턴스 퍼블릭 IP 또는 도메인
+$DCV_GATEWAY_HOST = "1.2.3.4"; 
+
+// 로그인 여부 체크 (sessionId 쿠키 없으면 막기)
 if (!isset($_COOKIE['sessionId'])) {
     echo "로그인 후 이용 가능합니다. <a href='login.php'>로그인하기</a>";
     exit;
@@ -10,47 +13,53 @@ if (!isset($_COOKIE['sessionId'])) {
 
 $sessionIdCookie = $_COOKIE['sessionId'];
 
-$error = "";
+$error  = "";
 $result = null;
 
-// 기본값: 테스트용 게임/리전
+// 기본값: 테스트용
 $defaultGameId = "test-game";
 $defaultRegion = "ap-northeast-2";
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $gameId = $_POST['game_id'] ?? $defaultGameId;
-    $region = $_POST['region'] ?? $defaultRegion;
+    $gameId = $_POST['gameId'] ?? '';
+    $region = $_POST['region'] ?? '';
 
-    $payload = json_encode([
-        "gameId" => $gameId,
-        "region" => $region
-    ]);
-
-    // 예시 엔드포인트: 실제 API Gateway 경로에 맞춰 수정 (중요)
-    $url = "$API_BASE/game-sessions";
-
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        "Content-Type: application/json",
-        "Cookie: sessionId=$sessionIdCookie"
-    ]);
-
-    $response = curl_exec($ch);
-    $status   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($status === 200 || $status === 201) {
-        // 예시 응답:
-        // { "sessionId": "sess-123", "status": "CREATING" }
-        $result = json_decode($response, true);
-        if (!$result) {
-            $error = "JSON 파싱 실패: $response";
-        }
+    if ($gameId === '' || $region === '') {
+        $error = "gameId / region 을 모두 입력하세요.";
     } else {
-        $error = "세션 생성 실패 (HTTP $status): $response";
+        $payload = json_encode([
+            "gameId" => $gameId,
+            "region" => $region,
+        ], JSON_UNESCAPED_UNICODE);
+
+        // Lambda(API Gateway) 호출
+        $ch = curl_init($API_BASE . "/game-sessions");
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HEADER, true); // 헤더 + 바디 같이 받기
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            "Content-Type: application/json",
+            // 로그인 때 받은 sessionId 쿠키를 그대로 전달
+            "Cookie: sessionId=" . $sessionIdCookie,
+        ]);
+
+        $response    = curl_exec($ch);
+        $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $status      = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        $header = substr($response, 0, $header_size);
+        $body   = substr($response, $header_size);
+
+        if ($status === 200) {
+            $result = json_decode($body, true);
+            if ($result === null) {
+                $error = "세션 생성은 되었지만 JSON 파싱에 실패했습니다: " . htmlspecialchars($body);
+            }
+        } else {
+            $error = "세션 생성 실패 (HTTP {$status}): " . htmlspecialchars($body);
+        }
     }
 }
 ?>
@@ -62,37 +71,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </head>
 <body>
   <h2>게임 세션 생성</h2>
-  <p><a href="login.php">← 로그인 페이지</a> | <a href="me.php">내 정보</a></p>
+
+  <p>
+    &larr; <a href="login.php">로그인 페이지</a> |
+    <a href="me.php">내 정보</a>
+  </p>
 
   <?php if (!empty($error)): ?>
-    <p style="color:red;"><?php echo htmlspecialchars($error); ?></p>
+    <p style="color:red;"><?php echo $error; ?></p>
   <?php endif; ?>
 
   <?php if ($result): ?>
-    <p style="color:green;">세션이 생성되었습니다.</p>
+    <h3>세션 생성 결과</h3>
     <pre><?php echo htmlspecialchars(json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)); ?></pre>
 
-    <?php if (!empty($result['sessionId'])): ?>
-      <p>
-        세션 상태 확인:
-        <a href="session_status.php?id=<?php echo urlencode($result['sessionId']); ?>">
-          session_status.php?id=<?php echo htmlspecialchars($result['sessionId']); ?>
-        </a>
-      </p>
-    <?php endif; ?>
+    <?php
+      $gameSessionId = $result['gameSessionId'] ?? null;
+
+      $connectUrl = "https://" . $DCV_GATEWAY_HOST . ":8443";
+    ?>
+
+    <p style="margin-top: 12px;">
+      <a href="<?php echo htmlspecialchars($connectUrl); ?>" target="_blank">
+        <button type="button">DCV 게이트웨이 접속 (가라버튼)</button>
+      </a>
+    </p>
+
+    <hr>
   <?php endif; ?>
 
-  <h3>새 세션 만들기</h3>
   <form method="POST">
     <div>
       <label>Game ID:
-        <input type="text" name="game_id" value="<?php echo htmlspecialchars($defaultGameId); ?>">
+        <input type="text" name="gameId"
+               value="<?php echo isset($_POST['gameId'])
+                              ? htmlspecialchars($_POST['gameId'])
+                              : htmlspecialchars($defaultGameId); ?>">
       </label>
     </div>
     <br>
     <div>
       <label>Region:
-        <input type="text" name="region" value="<?php echo htmlspecialchars($defaultRegion); ?>">
+        <input type="text" name="region"
+               value="<?php echo isset($_POST['region'])
+                              ? htmlspecialchars($_POST['region'])
+                              : htmlspecialchars($defaultRegion); ?>">
       </label>
     </div>
     <br>
@@ -100,4 +123,3 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   </form>
 </body>
 </html>
-
