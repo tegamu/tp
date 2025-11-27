@@ -1,9 +1,5 @@
-]<?php
-// session_status.php
-// - 특정 게임 세션 ID의 상태를 조회
-// - status 가 READY 이고 dcvEndpoint/port 가 내려오면 "게임 접속하기 (DCV)" 버튼 노출
-
-include 'config.php'; // 여기에서 $API_BASE 가 정의되어 있다고 가정
+<?php
+include 'config.php'; // 여기서 $API_BASE 만 쓰면 됨. IP 안 씀.
 
 if (!isset($_COOKIE['sessionId'])) {
     echo "로그인 후 이용 가능합니다. <a href='login.php'>로그인하기</a>";
@@ -18,97 +14,79 @@ if ($targetSessionId === '') {
     exit;
 }
 
-$error = "";
-$data  = null;
-$rawBody = null;
-$httpCode = null;
+// 1) 게이트웨이 URL 조회
+$cfgUrl = rtrim($API_BASE, '/') . '/config/dcv-gateway';
+$ch1 = curl_init($cfgUrl);
+curl_setopt($ch1, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch1, CURLOPT_TIMEOUT, 5);
+$cfgBody = curl_exec($ch1);
+$cfgCode = curl_getinfo($ch1, CURLINFO_HTTP_CODE);
+curl_close($ch1);
 
-// Lambda (GET /game-sessions/{id}) 호출
-$ch = curl_init();
-curl_setopt($ch, CURLOPT_URL, $API_BASE . "/game-sessions/" . urlencode($targetSessionId));
-curl_setopt($ch, CURLOPT_HTTPGET, true);
-curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    "Cookie: sessionId=" . $sessionIdCookie,
-]);
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_HEADER, true);
-
-$resp = curl_exec($ch);
-if ($resp === false) {
-    $error = "세션 상태 조회 실패: " . curl_error($ch);
-} else {
-    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    $header     = substr($resp, 0, $headerSize);
-    $body       = substr($resp, $headerSize);
-    $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-    $rawBody  = $body;
-    $httpCode = $statusCode;
-
-    $decoded = json_decode($body, true);
-    if ($statusCode >= 200 && $statusCode < 300 && is_array($decoded)) {
-        $data = $decoded;
-    } else {
-        $error = "세션 상태 조회 실패 (HTTP {$statusCode}): " . htmlspecialchars($body);
+$gatewayUrl = '';
+if ($cfgCode === 200 && $cfgBody !== false) {
+    $cfgJson = json_decode($cfgBody, true);
+    if (is_array($cfgJson) && isset($cfgJson['dcvGatewayUrl'])) {
+        $gatewayUrl = $cfgJson['dcvGatewayUrl'];
     }
 }
-curl_close($ch);
 
-// dcvEndpoint / port 계산
-$dcvUrl = "";
-if ($data && isset($data['dcvEndpoint'])) {
-    $dcvEndpoint = $data['dcvEndpoint'];
-} elseif ($data && isset($data['dcv_endpoint'])) {
-    $dcvEndpoint = $data['dcv_endpoint'];
-} else {
-    $dcvEndpoint = "";
-}
+// 2) 세션 상태 조회 (기존 API)
+$statusUrl = rtrim($API_BASE, '/') . '/game/session/status?sessionId=' . urlencode($targetSessionId);
+$ch2 = curl_init($statusUrl);
+curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch2, CURLOPT_TIMEOUT, 5);
+$statusBody = curl_exec($ch2);
+$statusCode = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+curl_close($ch2);
 
-$port = 8443;
-if ($data && isset($data['port']) && is_numeric($data['port'])) {
-    $port = intval($data['port']);
-}
-
-$status = $data['status'] ?? ($data['ec2State'] ?? 'UNKNOWN');
-
-if ($dcvEndpoint && strtoupper($status) === 'READY') {
-    // 예: https://<public-ip>:8443
-    $dcvUrl = "https://" . $dcvEndpoint . ":" . $port;
+$statusJson = null;
+if ($statusCode === 200 && $statusBody !== false) {
+    $statusJson = json_decode($statusBody, true);
 }
 ?>
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <title>게임 세션 상태</title>
+  <meta charset="UTF-8" />
+  <title>세션 상태</title>
 </head>
 <body>
-    <h1>게임 세션 상태</h1>
-    <p><a href="session_create.php">← 세션 생성 페이지로</a></p>
+  <h1>세션 상태</h1>
 
-    <p>조회 중인 세션 ID: <code><?php echo htmlspecialchars($targetSessionId); ?></code></p>
+  <p>조회 중인 세션 ID: <strong><?php echo htmlspecialchars($targetSessionId); ?></strong></p>
 
-    <?php if ($error): ?>
-        <p style="color: red;"><?php echo $error; ?></p>
-    <?php endif; ?>
+  <h2>세션 상태 API 응답</h2>
+  <p>HTTP STATUS: <?php echo htmlspecialchars((string)$statusCode); ?></p>
+  <pre><?php echo htmlspecialchars($statusBody ?? '', ENT_QUOTES, 'UTF-8'); ?></pre>
 
-    <?php if ($data): ?>
-        <h2>상태 정보</h2>
-        <pre><?php echo htmlspecialchars(json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)); ?></pre>
-    <?php endif; ?>
+  <?php if ($statusJson): ?>
+    <h3>파싱된 데이터</h3>
+    <pre><?php echo htmlspecialchars(json_encode($statusJson, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), ENT_QUOTES, 'UTF-8'); ?></pre>
+  <?php endif; ?>
 
-    <?php if ($dcvUrl): ?>
-        <p style="margin-top: 16px;">
-            <a href="<?php echo htmlspecialchars($dcvUrl); ?>" target="_blank" rel="noopener noreferrer">
-                <button type="button">게임 접속하기 (DCV)</button>
-            </a>
-        </p>
-        <p>
-            현재는 <code><?php echo htmlspecialchars($dcvUrl); ?></code> 로 바로 접속합니다.<br>
-            이후 CloudFront/게이트웨이를 붙이면 이 URL만 교체하면 됩니다.
-        </p>
-    <?php else: ?>
-        <p>status가 READY이고 dcvEndpoint/port가 내려오면 여기 DCV 접속 버튼이 나옵니다.</p>
-    <?php endif; ?>
+  <hr>
+
+  <?php if ($gatewayUrl): ?>
+    <?php
+      // 게이트웨이 URL은 Lambda에서 내려준 값 사용
+      // PHP 쪽은 IP/도메인 전혀 모름
+      $fullGatewayUrl = $gatewayUrl . '?sessionId=' . urlencode($targetSessionId);
+    ?>
+    <p>
+      <a href="<?php echo htmlspecialchars($fullGatewayUrl, ENT_QUOTES, 'UTF-8'); ?>"
+         target="_blank" rel="noopener noreferrer">
+        <button type="button">게임 접속하기 (DCV Gateway)</button>
+      </a>
+    </p>
+    <p style="font-size: 0.9rem; color: #666;">
+      ※ 게이트웨이 주소는 API에서 받아온 값이며, PHP 코드에는 IP/도메인을 직접 적지 않습니다.
+    </p>
+  <?php else: ?>
+    <p style="color:red;">게이트웨이 설정 정보를 가져오지 못했습니다. (<?php echo htmlspecialchars((string)$cfgCode); ?>)</p>
+    <pre><?php echo htmlspecialchars($cfgBody ?? '', ENT_QUOTES, 'UTF-8'); ?></pre>
+  <?php endif; ?>
+
+  <p><a href="session_create.php">세션 생성 페이지로 돌아가기</a></p>
 </body>
 </html>
