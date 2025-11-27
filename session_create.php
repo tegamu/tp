@@ -1,248 +1,184 @@
-import os
-import json
-import time
-import uuid
+<?php
+// tp-dev/session_create.php
+// - 로그인된 사용자가 "게임 세션 생성"을 눌러 DCV 서버용 EC2 인스턴스를 생성
+// - 성공 시, 생성된 gameSessionId를 보여주고 상태/접속 페이지로 이동하는 버튼 제공
 
-import boto3
-import pymysql
+session_start();
+include 'config.php'; // 여기에서 $API_BASE 가 정의되어 있다고 가정
 
-DB_CONFIG = {
-    "host": os.environ["DB_HOST"],
-    "user": os.environ["DB_USER"],
-    "password": os.environ["DB_PASSWORD"],
-    "db": os.environ["DB_NAME"],
-    "port": int(os.environ.get("DB_PORT", "3306")),
-    "charset": "utf8mb4",
-    "cursorclass": pymysql.cursors.DictCursor,
-    "autocommit": True,
+// 로그인 세션(쿠키) + PHP 세션(userId)
+$loginSessionId = $_COOKIE['sessionId'] ?? '';
+$currentUserId  = $_SESSION['userId'] ?? '';
+
+$error        = "";
+$result       = null;
+$apiBody      = null;
+$apiCode      = null;
+$gameSessionId = "";
+
+// 기본 Region
+$defaultRegion = "ap-northeast-2";
+
+// 1) 로그인 / userId 체크
+if ($loginSessionId === '') {
+    $error = "로그인 후 이용 가능합니다. 다시 로그인해 주세요.";
+} elseif ($currentUserId === '' || $currentUserId === null) {
+    // 네가 보고 있던 에러 문구 그대로 넣음
+    $error = "userId 정보를 찾을 수 없습니다. 다시 로그인해 주세요.";
 }
 
-EC2_REGION = os.environ.get("EC2_REGION", "ap-northeast-2")
+// 2) 폼 제출 처리 (에러 없을 때만)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $error === "") {
+    $gameId = $_POST['game_id'] ?? '';
+    $region = $_POST['region'] ?? $defaultRegion;
 
-GAME_AMI_ID = os.environ["GAME_AMI_ID"]
-GAME_INSTANCE_TYPE = os.environ["GAME_INSTANCE_TYPE"]
-GAME_KEY_NAME = os.environ.get("GAME_KEY_NAME")
+    if ($gameId === '') {
+        $error = "game_id 를 입력하세요.";
+    } else {
+        $payload = json_encode([
+            "gameId" => $gameId,
+            "region" => $region,
+            // 굳이 필요하진 않지만, 참고용으로 userId도 같이 보낼 수 있음
+            "userId" => $currentUserId,
+        ]);
 
-GAME_SG_ID = os.environ["GAME_SG_ID"]
-GAME_SUBNET_ID = os.environ["GAME_SUBNET_ID"]
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $API_BASE . "/game-sessions");
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            "Content-Type: application/json",
+            // HTTP API v2 에서도 쿠키는 일반 헤더로 전달 가능
+            "Cookie: sessionId=" . $loginSessionId,
+        ]);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 
-SM_BROKER_HOST = os.environ["SM_BROKER_HOST"]
-DCV_GATEWAY_HOST = os.environ.get("DCV_GATEWAY_HOST")
+        $response = curl_exec($ch);
 
+        if ($response === false) {
+            $error = "세션 생성 요청 실패: " . curl_error($ch);
+            curl_close($ch);
+        } else {
+            $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
 
-def _get_db_conn():
-    return pymysql.connect(**DB_CONFIG)
+            $apiBody = $response;
+            $apiCode = $statusCode;
 
+            if ($statusCode === 200 || $statusCode === 201) {
+                $decoded = json_decode($response, true);
+                if (!is_array($decoded)) {
+                    $error = "세션 생성 응답 형식이 올바르지 않습니다.";
+                } else {
+                    // 람다 응답에 따라 키 이름이 sessionId 또는 gameSessionId 일 수 있으므로 모두 시도
+                    if (isset($decoded['gameSessionId'])) {
+                        $gameSessionId = $decoded['gameSessionId'];
+                    } elseif (isset($decoded['sessionId'])) {
+                        $gameSessionId = $decoded['sessionId'];
+                    } elseif (isset($decoded['session_id'])) {
+                        $gameSessionId = $decoded['session_id'];
+                    }
 
-def _response(status: int, body: dict) -> dict:
-    return {
-        "statusCode": status,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps(body),
-    }
+                    $result = $decoded;
 
-
-def _get_cookie_one(cookie_str: str, name: str) -> str | None:
-    parts = [p.strip() for p in cookie_str.split(";") if p.strip()]
-    prefix = name + "="
-    for part in parts:
-        if part.startswith(prefix):
-            return part[len(prefix) :]
-    return None
-
-
-def _extract_login_session_id(event: dict) -> str | None:
-    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
-
-    cookie_header = headers.get("cookie")
-    if cookie_header:
-        sid = _get_cookie_one(cookie_header, "sessionId")
-        if sid:
-            return sid
-
-    for c in event.get("cookies") or []:
-        sid = _get_cookie_one(c, "sessionId")
-        if sid:
-            return sid
-
-    return None
-
-
-DCV_USER_DATA_TEMPLATE = """#!/bin/bash
-set -xe
-
-DCVCONF="/etc/dcv/dcv.conf"
-if [ -f "$DCVCONF" ]; then
-  cp "$DCVCONF" "${DCVCONF}.bak" || true
-fi
-
-cat > "$DCVCONF" << 'DCVCONF_EOF'
-[session-management/defaults]
-
-[session-management/automatic-console-session]
-owner = "ubuntu"
-
-[display]
-web-display = true
-
-[connectivity]
-web-port = 8443
-
-[security]
-authentication = "none"
-DCVCONF_EOF
-
-systemctl enable dcvserver || true
-systemctl restart dcvserver || systemctl start dcvserver || true
-
-AGENTCONF="/etc/dcv-session-manager-agent/agent.conf"
-if [ -f "$AGENTCONF" ]; then
-  cp "$AGENTCONF" "${AGENTCONF}.bak" || true
-fi
-
-mkdir -p /etc/dcv-session-manager-agent
-cat > "$AGENTCONF" << 'AGENTCONF_EOF'
-[agent]
-broker_host = "{BROKER_HOST}"
-broker_port = 8445
-
-[security]
-tls_strict = false
-AGENTCONF_EOF
-
-systemctl enable dcv-session-manager-agent || true
-systemctl restart dcv-session-manager-agent || systemctl start dcv-session-manager-agent || true
-"""
-
-
-def _create_game_instance(user_id: str) -> dict:
-    ec2 = boto3.client("ec2", region_name=EC2_REGION)
-
-    session_id = f"sess-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
-    print("[game] creating EC2 for session:", session_id, "user:", user_id)
-
-    user_data_script = DCV_USER_DATA_TEMPLATE.format(
-        BROKER_HOST=SM_BROKER_HOST,
-    )
-
-    run_args = {
-        "ImageId": GAME_AMI_ID,
-        "InstanceType": GAME_INSTANCE_TYPE,
-        "MinCount": 1,
-        "MaxCount": 1,
-        "NetworkInterfaces": [
-            {
-                "DeviceIndex": 0,
-                "SubnetId": GAME_SUBNET_ID,
-                "Groups": [GAME_SG_ID],
-                "AssociatePublicIpAddress": True,
+                    if ($gameSessionId === "") {
+                        $error = "세션은 생성되었지만 sessionId를 응답에서 찾지 못했습니다.";
+                    }
+                }
+            } else {
+                $error = "세션 생성 실패 (HTTP {$statusCode}): "
+                       . htmlspecialchars($response, ENT_QUOTES, 'UTF-8');
             }
-        ],
-        "UserData": user_data_script,
-        "TagSpecifications": [
-            {
-                "ResourceType": "instance",
-                "Tags": [
-                    {"Key": "Name", "Value": f"game-session-{session_id}"},
-                    {"Key": "GameSessionId", "Value": session_id},
-                    {"Key": "GameUserId", "Value": user_id},
-                ],
-            }
-        ],
+        }
     }
+}
+?>
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>게임 세션 생성</title>
+</head>
+<body>
+    <h1>게임 세션 생성</h1>
 
-    if GAME_KEY_NAME:
-        run_args["KeyName"] = GAME_KEY_NAME
+    <!-- 디버그용: 현재 로그인/유저 정보 표시 -->
+    <p>
+        현재 로그인 세션 ID (쿠키): 
+        <code>
+            <?php
+            echo $loginSessionId !== ''
+                ? htmlspecialchars($loginSessionId, ENT_QUOTES, 'UTF-8')
+                : '(없음)';
+            ?>
+        </code>
+        <br>
+        현재 사용자 ID (PHP 세션):
+        <code>
+            <?php
+            echo $currentUserId !== ''
+                ? htmlspecialchars($currentUserId, ENT_QUOTES, 'UTF-8')
+                : '(없음)';
+            ?>
+        </code>
+    </p>
 
-    resp = ec2.run_instances(**run_args)
-    instance = resp["Instances"][0]
-    instance_id = instance["InstanceId"]
+    <?php if ($error): ?>
+        <p style="color:red;"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></p>
+        <?php if ($loginSessionId === '' || $currentUserId === ''): ?>
+            <p><a href="login.php">로그인 페이지로 이동</a></p>
+        <?php endif; ?>
+    <?php endif; ?>
 
-    print("[game] EC2 instance created:", instance_id)
+    <?php if ($result && $gameSessionId !== ""): ?>
+        <hr>
+        <h2>세션 생성 완료</h2>
+        <p>생성된 Game Session ID: 
+            <code><?php echo htmlspecialchars($gameSessionId, ENT_QUOTES, 'UTF-8'); ?></code>
+        </p>
 
-    with _get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO game_sessions (session_id, user_id, instance_id, status)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (session_id, user_id, instance_id, "PENDING"),
-            )
+        <p>
+            <a href="session_status.php?id=<?php echo urlencode($gameSessionId); ?>">
+                <button type="button">세션 상태 / 접속 페이지로 이동</button>
+            </a>
+        </p>
 
-    return {
-        "sessionId": session_id,
-        "status": "PENDING",
-        "instanceId": instance_id,
-    }
+        <hr>
+        <h3>원시 응답(JSON)</h3>
+        <pre><?php
+            echo htmlspecialchars(
+                json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
+                ENT_QUOTES,
+                'UTF-8'
+            );
+        ?></pre>
+    <?php endif; ?>
 
-
-def _handler_impl(event, context):
-    print("[game] event:", json.dumps(event)[:1000])
-
-    login_session_id = _extract_login_session_id(event)
-    if not login_session_id:
-        print("[game] no login sessionId cookie")
-        return _response(401, {"error": "unauthorized", "detail": "login sessionId cookie missing"})
-
-    # ★ 여기만 ms → sec 로 바뀐 부분
-    now_sec = int(time.time())
-
-    row = None
-    try:
-        with _get_db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, expires_at, status
-                    FROM sessions
-                    WHERE session_id = %s
-                    """,
-                    (login_session_id,),
-                )
-                row = cur.fetchone()
-    except Exception as e:
-        print("[game] ERROR loading login session:", repr(e))
-        return _response(500, {"error": "internal", "detail": "failed to load login session"})
-
-    if not row:
-        print("[game] login session not found:", login_session_id)
-        return _response(401, {"error": "unauthorized", "detail": "session not found"})
-
-    if row["status"] != "active":
-        print("[game] login session not active:", row["status"])
-        return _response(401, {"error": "unauthorized", "detail": "session not active"})
-
-    if row["expires_at"] <= now_sec:
-        print("[game] login session expired:", row["expires_at"], "<=", now_sec)
-        return _response(401, {"error": "unauthorized", "detail": "session expired"})
-
-    user_id = row["user_id"]
-
-    raw_body = event.get("body") or ""
-    if event.get("isBase64Encoded"):
-        import base64
-        raw_body = base64.b64decode(raw_body).decode("utf-8")
-
-    try:
-        body = json.loads(raw_body) if raw_body else {}
-    except json.JSONDecodeError:
-        body = {}
-
-    game_id = body.get("gameId") or body.get("game_id") or "default"
-    region = body.get("region") or EC2_REGION
-
-    print(f"[game] user_id={user_id}, game_id={game_id}, region={region}")
-
-    result = _create_game_instance(user_id=user_id)
-    result.update({"gameId": game_id, "region": region})
-
-    return _response(200, result)
-
-
-def handler(event, context):
-    try:
-        return _handler_impl(event, context)
-    except Exception as e:
-        print("[game] UNEXPECTED ERROR:", repr(e))
-        return _response(500, {"error": "internal", "detail": str(e)})
+    <!-- userId/로그인 에러가 없을 때만 새 세션 생성 폼 노출 -->
+    <?php if ($error === "" || ($error && $loginSessionId !== '' && $currentUserId !== '' && !$result)): ?>
+        <hr>
+        <h2>새 세션 생성</h2>
+        <form method="post">
+            <div>
+                <label>Game ID:
+                    <input type="text" name="game_id"
+                           value="<?php echo isset($_POST['game_id'])
+                                          ? htmlspecialchars($_POST['game_id'], ENT_QUOTES, 'UTF-8')
+                                          : ''; ?>">
+                </label>
+            </div>
+            <br>
+            <div>
+                <label>Region:
+                    <input type="text" name="region"
+                           value="<?php echo isset($_POST['region'])
+                                          ? htmlspecialchars($_POST['region'], ENT_QUOTES, 'UTF-8')
+                                          : htmlspecialchars($defaultRegion, ENT_QUOTES, 'UTF-8'); ?>">
+                </label>
+            </div>
+            <br>
+            <button type="submit">세션 생성</button>
+        </form>
+    <?php endif; ?>
+</body>
+</html>
