@@ -1,120 +1,84 @@
 <?php
-// ==========================================
-// 환경 변수에서 설정 가져오기
-// ==========================================
-$API_BASE_URL      = getenv('API_BASE_URL')      ?: 'https://example-api.execute-api.ap-northeast-2.amazonaws.com/prod';
-$DCV_GATEWAY_HOST  = getenv('DCV_GATEWAY_HOST')  ?: '';      // 예: 3.39.x.x (게이트웨이 IP)
-$DCV_GATEWAY_PORT  = getenv('DCV_GATEWAY_PORT')  ?: '8443';  // DCV Gateway listen 포트
-$DCV_GATEWAY_SCHEME= getenv('DCV_GATEWAY_SCHEME')?: 'https'; // 보통 https
+// session_create.php
+// - 로그인된 사용자가 "게임 세션 생성"을 눌러 DCV 서버용 EC2 인스턴스를 생성
+// - 성공 시, 생성된 gameSessionId를 보여주고 상태/접속 페이지로 이동하는 버튼 제공
 
-$gatewayConfigError = '';
-if ($DCV_GATEWAY_HOST === '') {
-    $gatewayConfigError = 'DCV_GATEWAY_HOST 환경변수가 설정되어 있지 않습니다.';
+include 'config.php'; // 여기에서 $API_BASE 가 정의되어 있다고 가정
+
+if (!isset($_COOKIE['sessionId'])) {
+    echo "로그인 후 이용 가능합니다. <a href='login.php'>로그인하기</a>";
+    exit;
 }
 
-// ==========================================
-// 공통 API 호출 함수
-// ==========================================
-function call_api($method, $url, $body = null, $headers = [])
-{
-    $ch = curl_init();
+$sessionIdCookie = $_COOKIE['sessionId'];
 
-    $opts = [
-        CURLOPT_URL            => $url,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_CUSTOMREQUEST  => strtoupper($method),
-        CURLOPT_TIMEOUT        => 15,
-    ];
+$error    = "";
+$result   = null;
+$apiBody  = null;
+$apiCode  = null;
+$gameSessionId = "";
 
-    if ($body !== null) {
-        $json = json_encode($body);
-        $opts[CURLOPT_POSTFIELDS] = $json;
-        $headers[] = 'Content-Type: application/json';
-        $headers[] = 'Content-Length: ' . strlen($json);
-    }
+// 기본 Region (필요에 따라 수정)
+$defaultRegion = "ap-northeast-2";
 
-    if (!empty($headers)) {
-        $opts[CURLOPT_HTTPHEADER] = $headers;
-    }
-
-    curl_setopt_array($ch, $opts);
-
-    $responseBody = curl_exec($ch);
-    $httpCode     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $err          = curl_error($ch);
-
-    curl_close($ch);
-
-    return [
-        'status_code' => $httpCode,
-        'error'       => $err ?: null,
-        'body_raw'    => $responseBody,
-        'body_json'   => json_decode($responseBody, true),
-    ];
-}
-
-// ==========================================
-// 세션 생성 처리 (POST)
-// ==========================================
-$createErrorMessage = null;
-$createResponse     = null;
-$gameSessionId      = null;
-$gameSessionStatus  = null;
-$instanceId         = null;
-$dcvEndpoint        = null;
-$connectUrl         = null;
-
+// 폼 제출 처리
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // 필요하면 game_id, region 등 폼 파라미터 추가
-    $payload = [
-        // 'gameId' => $_POST['game_id'] ?? null,
-        // 'region' => $_POST['region'] ?? 'ap-northeast-2',
-    ];
+    $gameId = $_POST['game_id'] ?? '';
+    $region = $_POST['region'] ?? $defaultRegion;
 
-    $url = rtrim($API_BASE_URL, '/') . '/game-session/create';
-
-    // 로그인 세션 쿠키 같은 거 있으면 여기에 붙이면 됨
-    $headers = [];
-    if (!empty($_COOKIE['sessionId'])) {
-        $headers[] = 'Cookie: sessionId=' . $_COOKIE['sessionId'];
-    }
-
-    $createResponse = call_api('POST', $url, $payload, $headers);
-
-    if ($createResponse['error']) {
-        $createErrorMessage = 'cURL error: ' . $createResponse['error'];
-    } elseif ($createResponse['status_code'] < 200 || $createResponse['status_code'] >= 300) {
-        $createErrorMessage = 'HTTP ' . $createResponse['status_code'] . ' 에러: ' . $createResponse['body_raw'];
+    if ($gameId === '') {
+        $error = "game_id 를 입력하세요.";
     } else {
-        $data = $createResponse['body_json'] ?? null;
+        $payload = json_encode([
+            "gameId" => $gameId,
+            "region" => $region,
+        ]);
 
-        if (!is_array($data)) {
-            $createErrorMessage = '응답을 JSON으로 파싱할 수 없습니다.';
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $API_BASE . "/game-sessions");
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            "Content-Type: application/json",
+            // HTTP API v2 에서도 쿠키는 일반 헤더로 전달 가능
+            "Cookie: sessionId=" . $sessionIdCookie,
+        ]);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HEADER, true);
+
+        $resp = curl_exec($ch);
+        if ($resp === false) {
+            $error = "세션 생성 API 호출 실패: " . curl_error($ch);
         } else {
-            // Lambda 응답 키에 맞춰 읽기
-            $gameSessionId     = $data['sessionId']     ?? $data['gameSessionId'] ?? null;
-            $gameSessionStatus = $data['status']        ?? null;
-            $instanceId        = $data['instanceId']    ?? null;
-            $dcvEndpoint       = $data['dcvEndpoint']   ?? null;
+            $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            $header     = substr($resp, 0, $headerSize);
+            $body       = substr($resp, $headerSize);
+            $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
-            if (!$gameSessionId) {
-                $createErrorMessage = '세션 생성은 성공했지만 sessionId를 찾지 못했습니다.';
+            $apiBody = $body;
+            $apiCode = $statusCode;
+
+            $decoded = json_decode($body, true);
+            if ($statusCode >= 200 && $statusCode < 300 && is_array($decoded)) {
+                // 람다 응답에 따라 키 이름이 sessionId 또는 gameSessionId 일 수 있으므로 모두 시도
+                if (isset($decoded['gameSessionId'])) {
+                    $gameSessionId = $decoded['gameSessionId'];
+                } elseif (isset($decoded['sessionId'])) {
+                    $gameSessionId = $decoded['sessionId'];
+                } elseif (isset($decoded['session_id'])) {
+                    $gameSessionId = $decoded['session_id'];
+                }
+
+                $result = $decoded;
+                if ($gameSessionId === "") {
+                    $error = "세션은 생성되었지만 sessionId를 응답에서 찾지 못했습니다.";
+                }
             } else {
-                // 나중에 External Auth 붙이면 authToken을 진짜로 생성해서 넘길 것
-                $authToken = 'DUMMY-TOKEN';
-
-                // ✔ DCV Gateway URL
-                // 예: https://<GATEWAY_IP>:8443/?authToken=...#<sessionId>
-                $connectUrl = sprintf(
-                    '%s://%s:%s/?authToken=%s#%s',
-                    $DCV_GATEWAY_SCHEME,
-                    $DCV_GATEWAY_HOST,
-                    $DCV_GATEWAY_PORT,
-                    urlencode($authToken),
-                    $gameSessionId
-                );
+                $error = "세션 생성 실패 (HTTP {$statusCode}): " . htmlspecialchars($body);
             }
         }
+
+        curl_close($ch);
     }
 }
 ?>
@@ -122,107 +86,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>게임 세션 생성 / DCV 접속</title>
-    <style>
-        body {
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            margin: 20px;
-            background: #0b0c10;
-            color: #e5e5e5;
-        }
-        .container { max-width: 800px; margin: 0 auto; }
-        h1 { margin-bottom: 0.5rem; }
-        .card {
-            border: 1px solid #333;
-            border-radius: 8px;
-            padding: 16px;
-            margin-bottom: 16px;
-            background: #15171c;
-        }
-        .error { color: #ff5555; white-space: pre-wrap; }
-        .success { color: #50fa7b; white-space: pre-wrap; }
-        button {
-            padding: 8px 14px;
-            border-radius: 4px;
-            border: 1px solid #666;
-            background: #222;
-            color: #fff;
-            cursor: pointer;
-        }
-        button:hover { background: #333; }
-        .session-id { font-family: monospace; }
-        a { text-decoration: none; }
-        .small-text { font-size: 0.85rem; color: #bbb; }
-    </style>
+    <title>게임 세션 생성</title>
 </head>
 <body>
-<div class="container">
     <h1>게임 세션 생성</h1>
-    <p class="small-text">
-        세션을 생성하면 DCV Gateway / Resolver Lambda / RDS / DCV Server를 통해
-        사용자의 DCV GUI 세션으로 연결됩니다.
-    </p>
 
-    <?php if ($gatewayConfigError): ?>
-        <div class="card error">
-            <strong>게이트웨이 설정 오류</strong><br>
-            <?php echo htmlspecialchars($gatewayConfigError, ENT_QUOTES, 'UTF-8'); ?>
-        </div>
+    <p><a href="me.php">내 정보</a> | <a href="logout.php">로그아웃</a></p>
+
+    <?php if ($error): ?>
+        <p style="color: red;"><?php echo $error; ?></p>
     <?php endif; ?>
 
-    <div class="card">
-        <form method="post">
-            <!-- 필요하면 게임 선택 / 옵션 필드 추가 -->
-            <button type="submit">세션 생성</button>
-        </form>
-    </div>
+    <?php if ($result && $gameSessionId): ?>
+        <h2>세션 생성 완료</h2>
+        <p>생성된 세션 ID: <code><?php echo htmlspecialchars($gameSessionId); ?></code></p>
 
-    <?php if ($createErrorMessage): ?>
-        <div class="card error">
-            <strong>세션 생성 실패</strong><br>
-            <?php echo htmlspecialchars($createErrorMessage, ENT_QUOTES, 'UTF-8'); ?>
-        </div>
-    <?php elseif ($gameSessionId): ?>
-        <div class="card">
-            <div class="success">
-                <strong>세션 생성 성공</strong><br>
-                세션 ID:
-                <span class="session-id">
-                    <?php echo htmlspecialchars($gameSessionId, ENT_QUOTES, 'UTF-8'); ?>
-                </span><br>
-                <?php if ($gameSessionStatus): ?>
-                    상태:
-                    <?php echo htmlspecialchars($gameSessionStatus, ENT_QUOTES, 'UTF-8'); ?><br>
-                <?php endif; ?>
-                <?php if ($instanceId): ?>
-                    인스턴스 ID:
-                    <span class="session-id">
-                        <?php echo htmlspecialchars($instanceId, ENT_QUOTES, 'UTF-8'); ?>
-                    </span><br>
-                <?php endif; ?>
-            </div>
+        <p>
+            <a href="session_status.php?id=<?php echo urlencode($gameSessionId); ?>">
+                <button type="button">세션 상태 / 접속 페이지로 이동</button>
+            </a>
+        </p>
 
-            <hr style="margin: 12px 0;">
-
-            <?php if ($connectUrl): ?>
-                <p style="margin-top: 12px;">
-                    <a href="<?php echo htmlspecialchars($connectUrl, ENT_QUOTES, 'UTF-8'); ?>"
-                       target="_blank" rel="noopener noreferrer">
-                        <!-- ✅ 가라버튼 삭제, 실제 접속 버튼 -->
-                        <button type="button">세션 접속</button>
-                    </a>
-                </p>
-                <p class="small-text">
-                    DCV Gateway로 이동한 뒤, Gateway가 Resolver Lambda / RDS를 통해<br>
-                    이 세션에 해당하는 DCV Server로 연결합니다.
-                </p>
-            <?php else: ?>
-                <p class="error">
-                    세션 생성은 되었지만 게이트웨이 접속 URL을 생성하지 못했습니다.
-                </p>
-            <?php endif; ?>
-        </div>
+        <hr>
+        <h3>원시 응답(JSON)</h3>
+        <pre><?php echo htmlspecialchars(json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)); ?></pre>
     <?php endif; ?>
-</div>
+
+    <hr>
+    <h2>새 세션 생성</h2>
+    <form method="post">
+        <div>
+            <label>Game ID:
+                <input type="text" name="game_id"
+                       value="<?php echo isset($_POST['game_id']) ? htmlspecialchars($_POST['game_id']) : ''; ?>">
+            </label>
+        </div>
+        <br>
+        <div>
+            <label>Region:
+                <input type="text" name="region"
+                       value="<?php echo isset($_POST['region'])
+                                      ? htmlspecialchars($_POST['region'])
+                                      : htmlspecialchars($defaultRegion); ?>">
+            </label>
+        </div>
+        <br>
+        <button type="submit">세션 생성</button>
+    </form>
 </body>
 </html>
