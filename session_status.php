@@ -100,38 +100,5 @@ if ($statusBody !== false) {
   <?php endif; ?>
 
   <p><a href="session_create.php">세션 생성 페이지로 돌아가기</a></p>
-<script>
-let heartbeatTimer = null;
-
-function startHeartbeat() {
-  if (heartbeatTimer) return;
-  heartbeatTimer = setInterval(() => {
-    // ✅ 여기로는 "네 API" 로 요청을 보냄 (DCV 주소 아님)
-    fetch("/game-sessions/heartbeat", {
-      method: "POST",
-      credentials: "include", // sessionId 쿠키 같이 전송
-    }).catch((err) => {
-      console.log("heartbeat error", err);
-    });
-  }, 60000); // 60초마다
-}
-
-function stopHeartbeat() {
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
-}
-
-// 페이지가 열려 있는 동안 계속 heartbeat
-document.addEventListener("DOMContentLoaded", () => {
-  startHeartbeat();
-});
-
-// 탭/창 닫힐 때 정리
-window.addEventListener("beforeunload", () => {
-  stopHeartbeat();
-});
-</script>
 </body>
 </html>
