@@ -135,6 +135,3 @@ window.addEventListener("beforeunload", () => {
 </script>
 </body>
 </html>
-
-</body>
-</html>
